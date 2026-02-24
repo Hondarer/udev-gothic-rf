@@ -301,7 +301,41 @@ def adjust_some_glyph(jp_font, eng_font):
         except TypeError:
             # グリフが存在しない場合は継続する
             continue
+    # 一部の全角記号の可読性を上げるため拡大する
+    for uni in [0xFF1B, 0xFF1A, 0xFF07, 0xFF02, 0xFF0C, 0xFF0E] + list(
+        range(0x2018, 0x201F + 1)
+    ):
+        try:
+            glyph = jp_font[uni]
+            if glyph.isWorthOutputting():
+                scale_glyph_from_center(glyph, 1.15, 1.2)
+        except TypeError:
+            # グリフが存在しない場合は継続する
+            continue
     jp_font.selection.none()
+
+
+def scale_glyph_from_center(glyph, scale_x, scale_y):
+    """グリフの中心位置を基点としたスケール調整"""
+    original_width = glyph.width
+    # スケール前の中心位置を求める
+    before_bb = glyph.boundingBox()
+    before_center_x = (before_bb[0] + before_bb[2]) / 2
+    before_center_y = (before_bb[1] + before_bb[3]) / 2
+    # スケール変換
+    glyph.transform(psMat.scale(scale_x, scale_y))
+    # スケール後の中心位置を求める
+    after_bb = glyph.boundingBox()
+    after_center_x = (after_bb[0] + after_bb[2]) / 2
+    after_center_y = (after_bb[1] + after_bb[3]) / 2
+    # 拡大で増えた分を考慮して中心位置を調整
+    glyph.transform(
+        psMat.translate(
+            before_center_x - after_center_x,
+            before_center_y - after_center_y,
+        )
+    )
+    glyph.width = original_width
 
 
 def slash_zero(eng_font, style):
