@@ -22,6 +22,7 @@ FONT_NAME = settings.get("DEFAULT", "FONT_NAME")
 JP_FONT = settings.get("DEFAULT", "JP_FONT")
 ENG_FONT = settings.get("DEFAULT", "ENG_FONT")
 ENG_FONT_LG = settings.get("DEFAULT", "ENG_FONT_LG")
+EMOJI_STR = settings.get("DEFAULT", "EMOJI_STR")
 SOURCE_FONTS_DIR = settings.get("DEFAULT", "SOURCE_FONTS_DIR")
 BUILD_FONTS_DIR = settings.get("DEFAULT", "BUILD_FONTS_DIR")
 VENDER_NAME = settings.get("DEFAULT", "VENDER_NAME")
@@ -103,7 +104,7 @@ def main():
 def usage():
     print(
         f"Usage: {sys.argv[0]} "
-        "[--hidden-zenkaku-space] [--35] [--jpdoc] [--nerd-font] [--liga] [--dot-zero] [--right-four]"
+        "[--hidden-zenkaku-space] [--35] [--jpdoc] [--nerd-font] [--emoji] [--liga] [--dot-zero] [--right-four]"
     )
 
 
@@ -128,6 +129,8 @@ def get_options():
             options["jpdoc"] = True
         elif arg == "--nerd-font":
             options["nerd-font"] = True
+        elif arg == "--emoji":
+            options["emoji"] = True
         elif arg == "--liga":
             options["liga"] = True
         elif arg == "--dot-zero":
@@ -207,6 +210,7 @@ def generate_font(jp_style, eng_style, merged_style):
     variant += RIGHT_FOUR_STR if options.get("right-four") else ""
     variant += JPDOC_STR if options.get("jpdoc") else ""
     variant += NERD_FONTS_STR if options.get("nerd-font") else ""
+    variant += EMOJI_STR if options.get("emoji") else ""
     variant += LIGA_STR if options.get("liga") else ""
 
     # macOSでのpostテーブルの使用性エラー対策
