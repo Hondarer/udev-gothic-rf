@@ -3,3 +3,5 @@ build_tmp/
 work/
 release_files/
 /.claude
+__pycache__/
+prompt/

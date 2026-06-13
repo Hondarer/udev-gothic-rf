@@ -1,6 +1,7 @@
 # ini から VERSION を取得
 $ini = Get-Content .\build.ini
 $version = ($ini | Select-String -Pattern "VERSION").ToString().Split("=")[1].Trim()
+$emoji_str = ($ini | Select-String -Pattern "EMOJI_STR").ToString().Split("=")[1].Trim()
 
 # スクリプトファイルがある場所に移動する
 Set-Location -Path $PSScriptRoot
@@ -45,6 +46,13 @@ $option_and_output_folder = @(
     @("--hidden-zenkaku-space --right-four --35 --jpdoc", "35HSRFJPDOC-") # ビルド 3:5 全角スペース不可視 JPDOC版 + 4のグリフ変更
 )
 
+$emoji_option_and_output_folder = $option_and_output_folder | ForEach-Object {
+    $emoji_option = "$($_[0]) --emoji".Trim()
+    $emoji_output_folder = "$($_[1].TrimEnd('-'))$emoji_str-"
+    , @($emoji_option, $emoji_output_folder)
+}
+$option_and_output_folder += $emoji_option_and_output_folder
+
 $option_and_output_folder | Foreach-Object -ThrottleLimit 4 -Parallel {
     Write-Host "fontforge script start. option: `"$($_[0])`""
     Invoke-Expression "& `"C:\Program Files\FontForgeBuilds\bin\ffpython.exe`" .\fontforge_script.py --do-not-delete-build-dir $($_[0])" `
@@ -53,6 +61,12 @@ $option_and_output_folder | Foreach-Object -ThrottleLimit 4 -Parallel {
 }
 
 $move_file_src_dest = @(
+    @("UDEVGothic*HSRF*$emoji_str*-*.ttf", "UDEVGothic_HSRF_${emoji_str}_$version"),
+    @("UDEVGothic*RFNF*$emoji_str*-*.ttf", "UDEVGothic_RFNF_${emoji_str}_$version"),
+    @("UDEVGothic*RF*$emoji_str*-*.ttf", "UDEVGothic_RF_${emoji_str}_$version"),
+    @("UDEVGothic*HS*$emoji_str*-*.ttf", "UDEVGothic_HS_${emoji_str}_$version"),
+    @("UDEVGothic*NF*$emoji_str*-*.ttf", "UDEVGothic_NF_${emoji_str}_$version"),
+    @("UDEVGothic*$emoji_str*-*.ttf", "UDEVGothic_${emoji_str}_$version"),
     @("UDEVGothic*HSRF*-*.ttf", "UDEVGothic_HSRF_$version"),
     @("UDEVGothic*RFNF*-*.ttf", "UDEVGothic_RFNF_$version"),
     @("UDEVGothic*RF*-*.ttf", "UDEVGothic_RF_$version"),
