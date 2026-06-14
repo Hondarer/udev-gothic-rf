@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -33,6 +34,8 @@ EMOJI_STR = settings.get("DEFAULT", "EMOJI_STR")
 EMOJI_SOURCE_WIDTH = 1275
 EMOJI_SOURCE_BOTTOM = -212
 EMOJI_OVERRIDE_PATH = "doc/emoji-override.txt"
+EMOJI_REPORT_DIR = "doc"
+EMOJI_REPORT_PREFIX = "excluded-emoji-"
 
 
 def main():
@@ -126,13 +129,18 @@ def merge_fonts(style, variant):
 
     if EMOJI_STR in variant:
         return Path(
-            merge_emoji_font(merged_font_path, flag_35=WIDTH_35_STR in variant)
+            merge_emoji_font(
+                merged_font_path,
+                flag_35=WIDTH_35_STR in variant,
+                variant=variant,
+                style=style,
+            )
         ).name
 
     return Path(merged_font_path).name
 
 
-def merge_emoji_font(target_font_path: str, flag_35: bool):
+def merge_emoji_font(target_font_path: str, flag_35: bool, variant: str = "", style: str = ""):
     """Noto Color Emojiをマージする。
 
     既存の本文グリフを壊さないよう、targetに存在するcmapはemoji側から外す。
@@ -158,6 +166,15 @@ def merge_emoji_font(target_font_path: str, flag_35: bool):
         "_merged.ttf", "_base_for_emoji.ttf"
     )
     shutil.copyfile(target_font_path, target_merge_font_path)
+    # NotoColorEmoji の post は format 3.0 でグリフ名を保持しないため、保存すると
+    # rename_emoji_glyph_conflicts による改名 (emoji_*) が失われ、再読込時に cmap から
+    # AGL 名が再生成される。これにより merge で本文側グリフと名前衝突して別名・重複が
+    # 生じ、合成シーケンスの GSUB と cmap が別グリフを指してしまう。改名を保持するため
+    # post を format 2.0 にしてからグリフ名付きで保存する。
+    emoji_post = emoji_font["post"]
+    emoji_post.formatType = 2.0
+    emoji_post.extraNames = []
+    emoji_post.mapping = {}
     emoji_font.save(emoji_font_path)
 
     merger = merge.Merger()
@@ -165,14 +182,33 @@ def merge_emoji_font(target_font_path: str, flag_35: bool):
     merged_font.recalcBBoxes = False
     ensure_source_glyphs(merged_font, target_font)
     ensure_emoji_glyphs(merged_font, emoji_font, target_glyph_names)
-    max_emoji_glyphs = 65535 - len(target_glyph_names | {".notdef"})
-    emoji_base_glyph_names, emoji_required_glyph_names = collect_emoji_glyph_names(
-        emoji_font, max_emoji_glyphs
+    # GSUB/GPOS や合成グリフから参照されるグリフは、削除するとレイアウトテーブルが
+    # 壊れるため必ず残す必要がある。merged_font は prune 前で絵文字側の全グリフを
+    # 含むため、これらの参照グリフ (mandatory) は予算と独立した固定集合になる。
+    mandatory_glyph_names = collect_layout_glyph_names(merged_font)
+    mandatory_glyph_names |= collect_composite_component_glyph_names(
+        merged_font, mandatory_glyph_names | target_glyph_names
     )
-    emoji_required_glyph_names |= collect_layout_glyph_names(merged_font)
-    emoji_required_glyph_names |= collect_composite_component_glyph_names(
-        merged_font, emoji_required_glyph_names
-    )
+    # グリフ数の上限 (65535) を超えない範囲で絵文字を最大限残す。
+    # 予算を上限から始め、超過した分だけ絵文字本体の選択数を減らして再計算する。
+    # mandatory は予算と独立に必ず加わるため、超過分のみを削れば削除は最小限で済む。
+    glyph_limit = 65535
+    max_emoji_glyphs = glyph_limit - len(target_glyph_names | {".notdef"})
+    while True:
+        emoji_base_glyph_names, emoji_required_glyph_names = collect_emoji_glyph_names(
+            emoji_font, max_emoji_glyphs
+        )
+        emoji_required_glyph_names |= mandatory_glyph_names
+        emoji_required_glyph_names |= collect_composite_component_glyph_names(
+            merged_font, emoji_required_glyph_names
+        )
+        keep_glyph_names = (
+            target_glyph_names | emoji_required_glyph_names | {".notdef"}
+        )
+        overflow = len(keep_glyph_names) - glyph_limit
+        if overflow <= 0 or max_emoji_glyphs <= 0:
+            break
+        max_emoji_glyphs -= overflow
     prune_merged_glyphs(
         merged_font, target_glyph_names | emoji_required_glyph_names
     )
@@ -184,6 +220,8 @@ def merge_emoji_font(target_font_path: str, flag_35: bool):
         emoji_transform,
         emoji_base_glyph_names,
     )
+    # グリフ数上限のため収録できなかった絵文字を doc に記録する
+    write_excluded_emoji_report(merged_font, emoji_font, variant)
     merged_font["post"].formatType = 3.0
 
     if "vhea" in merged_font:
@@ -199,6 +237,131 @@ def merge_emoji_font(target_font_path: str, flag_35: bool):
     safe_remove(emoji_font_path)
     safe_remove(target_merge_font_path)
     return output_font_path
+
+
+def write_excluded_emoji_report(
+    merged_font: ttLib.TTFont, emoji_font: ttLib.TTFont, variant: str
+):
+    """グリフ数上限のため収録できなかった絵文字を doc にテキスト出力する。
+
+    列挙元には正規化済みの emoji_font を使う。emoji_font の cmap は合成先と重複する
+    コードポイント (# * 0-9 や異体字セレクタ付き記号など、文字を優先して色を使わない
+    もの) が除かれているため、それらを基底とするシーケンス (キーキャップ等) は自動で
+    対象外となり、グリフ数上限で出力グリフの色を失ったシーケンスだけを抽出できる。
+    ビルドのたびに最終フォントを直接解析するため、絵文字フォントの更新にも追従する。
+    """
+    if len(variant) == 0:
+        return
+
+    report_path = os.path.join(
+        EMOJI_REPORT_DIR, f"{EMOJI_REPORT_PREFIX}{variant}.txt"
+    )
+
+    # emoji_font は rename 済みのためグリフ名は merged_font と一致する
+    source_entries = collect_emoji_codepoint_entries(emoji_font)
+    source_colored = collect_colored_glyph_names(emoji_font)
+    merged_colored = collect_colored_glyph_names(merged_font)
+
+    total_emoji = 0
+    excluded_codepoints = []
+    for codepoints, output_glyph in source_entries.items():
+        # 色を持たない補助グリフ・シーケンスは対象外
+        if output_glyph not in source_colored:
+            continue
+        total_emoji += 1
+        if output_glyph in merged_colored:
+            continue
+        excluded_codepoints.append(codepoints)
+
+    if len(excluded_codepoints) == 0:
+        # 収録外が無くなった場合は古いレポートを残さない
+        safe_remove(report_path)
+        return
+
+    excluded_codepoints.sort()
+    os.makedirs(EMOJI_REPORT_DIR, exist_ok=True)
+    lines = [
+        f"UDEVGothic {variant} 収録外絵文字",
+        "",
+        f"絵文字フォント: {EMOJI_FONT}",
+        f"収録外: {len(excluded_codepoints)} / {total_emoji} 絵文字",
+        "TrueType のグリフ数上限 (65535) を超えるため収録できなかった絵文字。",
+        "Nerd Fonts のグリフ追加でグリフ数に余裕が無いバリアントで発生する。",
+        "いずれも肌色・ZWJ・国旗等の合成シーケンス。単体絵文字はすべて収録している。",
+        "列: 絵文字 <TAB> コードポイント <TAB> Unicode 名称",
+        "",
+    ]
+    for codepoints in excluded_codepoints:
+        char = "".join(chr(codepoint) for codepoint in codepoints)
+        codepoint_text = " ".join(f"U+{codepoint:04X}" for codepoint in codepoints)
+        name_text = " + ".join(
+            unicodedata.name(chr(codepoint), f"U+{codepoint:04X}")
+            for codepoint in codepoints
+        )
+        lines.append(f"{char}\t{codepoint_text}\t{name_text}")
+
+    with open(report_path, "w", encoding="utf-8") as report_file:
+        report_file.write("\n".join(lines) + "\n")
+
+
+def collect_emoji_codepoint_entries(font: ttLib.TTFont):
+    """絵文字エントリを {コードポイント列: 出力グリフ名} で返す。
+
+    単体絵文字は cmap、シーケンス絵文字は GSUB のリガチャから収集する。
+    リガチャの構成要素は cmap の逆引きでコードポイント列に変換する。
+    """
+    cmap = {}
+    if "cmap" in font:
+        for cmap_table in font["cmap"].tables:
+            if hasattr(cmap_table, "cmap"):
+                for codepoint, glyph_name in cmap_table.cmap.items():
+                    cmap.setdefault(codepoint, glyph_name)
+
+    reverse_cmap = {}
+    for codepoint, glyph_name in cmap.items():
+        reverse_cmap.setdefault(glyph_name, codepoint)
+
+    entries = {}
+    for codepoint, glyph_name in cmap.items():
+        entries[(codepoint,)] = glyph_name
+
+    if "GSUB" in font and font["GSUB"].table.LookupList is not None:
+        for lookup in font["GSUB"].table.LookupList.Lookup:
+            for subtable in lookup.SubTable:
+                ligatures = getattr(subtable, "ligatures", None)
+                if not isinstance(ligatures, dict):
+                    continue
+                for first_glyph, ligature_set in ligatures.items():
+                    for ligature in ligature_set:
+                        component_glyphs = (first_glyph,) + tuple(ligature.Component)
+                        codepoints = tuple(
+                            reverse_cmap.get(component)
+                            for component in component_glyphs
+                        )
+                        if any(codepoint is None for codepoint in codepoints):
+                            continue
+                        entries[codepoints] = ligature.LigGlyph
+    return entries
+
+
+def collect_colored_glyph_names(font: ttLib.TTFont):
+    """COLR のベースグリフ (色定義を持つ出力グリフ) 名の集合を返す。
+
+    絵文字の収録判定に使う。NotoColorEmoji は COLR と SVG が同じ絵文字集合を
+    網羅するため COLR で判定できる。SVG は docList の glyphID 範囲がマージ後の
+    グリフ並べ替えで分散し、範囲内の無関係なグリフまで含んでしまうため使わない。
+    """
+    glyph_names = set()
+    if "COLR" in font:
+        colr_table = font["COLR"]
+        if colr_table.version == 0:
+            glyph_names |= set(colr_table.ColorLayers.keys())
+        else:
+            base_glyph_list = getattr(colr_table.table, "BaseGlyphList", None)
+            if base_glyph_list is not None:
+                for record in base_glyph_list.BaseGlyphPaintRecord:
+                    glyph_names.add(record.BaseGlyph)
+    return glyph_names
 
 
 def load_emoji_override_codepoints():
